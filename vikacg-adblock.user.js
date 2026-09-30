@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VikACG 去广告（维咔V站）
 // @namespace    https://www.vikacg.com/
-// @version      1.4.0
+// @version      1.4.1
 // @description  移除维咔VikACG 的顶部广告条、轮播广告图、侧栏广告卡、信息流推广卡片与菜单广告链接，使站点的"广告拦截器检测"失效，并拦截投票/收藏/搜索后自动弹出的广告页。所有去广告动作只隐藏广告元素本身，不拦截、不改写任何正常链接的跳转；"外链直达"（跳过 /external 中转页）为可选项，可在油猴菜单中开关。支持主站与全部备用域名。
 // @author       liushuye555
 // @license      MIT
@@ -22,6 +22,7 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
+// @grant        GM_setClipboard
 // ==/UserScript==
 
 (function () {
@@ -244,6 +245,35 @@
     doc.addEventListener('DOMContentLoaded', startAttrGuard);
     try { startAttrGuard(); } catch (e) {}
 
+    // 4b) abp 标记同步护盾：站点读 body 的 abp 属性是同步的，MutationObserver 清除
+    // 是异步的——uBlock 先打标记就会命中。用属性陷阱让 abp 标记根本"写不进去"。
+    try {
+      let bodyEl = null;
+      const trapBody = (b) => {
+        if (!b || b.__vkTrapped) return;
+        b.__vkTrapped = true;
+        try {
+          Object.defineProperty(b, 'abp', {
+            configurable: true,
+            get() { return null; },
+            set() { /* 丢弃标记 */ },
+          });
+        } catch (e) {}
+      };
+      const origGetBody = Object.getOwnPropertyDescriptor(doc.__proto__ || doc.constructor.prototype, 'body') ||
+        Object.getOwnPropertyDescriptor(Document.prototype, 'body');
+      if (origGetBody && origGetBody.get) {
+        Object.defineProperty(doc.constructor.prototype, 'body', {
+          configurable: true,
+          get() {
+            const b = origGetBody.get.call(this);
+            if (b) trapBody(b);
+            return b;
+          },
+        });
+      }
+    } catch (e) {}
+
     // 5) 保险丝：万一仍弹检测提示，按文本特征把弹窗隐藏。
     // 站点会在文案里插零宽字符（U+200B 等）防文本匹配，匹配前必须先剥离。
     const stripZW = (s) => (s || '').replace(/[\u200B-\u200D\uFEFF\u2060]/g, '');
@@ -254,6 +284,7 @@
         if (TIP.test(stripZW(box.textContent || ''))) {
           // 弹窗本体常包在带遮罩的 wrapper 里，藏 wrapper 才不会留黑罩
           hide(box.closest('.arco-modal-wrapper') || box, 'detect-tip');
+          console.log('[VikACG 去广告] 熔断：已隐藏一个检测提示弹窗');
         }
       });
     };
@@ -488,8 +519,8 @@
     ];
     let ids = [];
     const registerAll = () => {
-      ids.forEach((id) => { try { GM_unregisterMenuCommand(id); } catch (e) {} });
-      ids = ITEMS.filter((it) => it).map(([key, label]) => GM_registerMenuCommand(
+      ids.forEach((id) => { try { GM_unregisterMenuCommand(id) } catch (e) {} });
+      ids = ITEMS.map(([key, label]) => GM_registerMenuCommand(
         (cfg[key] ? '✅ ' : '❌ ') + label,
         () => {
           cfg[key] = !cfg[key];
@@ -503,5 +534,25 @@
       ));
     };
     registerAll();
+    // 排查工具：一键导出诊断信息（正文被吞/漏广告时点这个，把输出复制给我）
+    ids.push(GM_registerMenuCommand('🩺 导出排查信息（出问题时用）', () => {
+      const vis = (el) => { let n = el; while (n && n !== doc.body) { if (win.getComputedStyle(n).display === 'none') return false; n = n.parentElement; } return true; };
+      const prose = doc.querySelector('main .prose, article');
+      const rules = {};
+      doc.querySelectorAll('[data-vk-ad-rule]').forEach((e) => { const r = e.dataset.vkAdRule; rules[r] = (rules[r] || 0) + 1; });
+      const info = {
+        脚本版本: VERSION,
+        当前页面: location.pathname,
+        配置: cfg,
+        正文: prose ? { 存在: true, 可见: vis(prose), 段落数: prose.querySelectorAll('p').length, 图片数: prose.querySelectorAll('img').length } : { 存在: false },
+        已隐藏元素按规则: rules,
+        检测标记abp: doc.body.hasAttribute('abp'),
+        检测弹窗当前可见: Array.from(doc.querySelectorAll('.arco-modal-wrapper, .arco-notification')).filter((b) => b.offsetParent !== null && !b.dataset.vkAdRule).length,
+        被我隐藏且在main内的元素: Array.from(doc.querySelectorAll('main [data-vk-ad-rule]')).map((e) => e.tagName + '.' + (typeof e.className === 'string' ? e.className.slice(0, 50) : '')),
+      };
+      console.log('%c========== VikACG 排查信息（复制下面整段发给我）==========', 'color:#7c3aed;font-weight:bold');
+      console.log(JSON.stringify(info, null, 2));
+      try { GM_setClipboard(JSON.stringify(info, null, 2)); console.log('(已自动复制到剪贴板)'); } catch (e) {}
+    }));
   })();
 })();
