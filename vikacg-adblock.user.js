@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VikACG 去广告（维咔V站）
 // @namespace    https://www.vikacg.com/
-// @version      1.3.0
+// @version      1.3.1
 // @description  移除维咔VikACG 的顶部广告条、轮播广告图、侧栏广告卡、信息流推广卡片与菜单广告链接，使站点的"广告拦截器检测"失效，并拦截投票/收藏/搜索后自动弹出的广告页。所有去广告动作只隐藏广告元素本身，不拦截、不改写任何正常链接的跳转；"外链直达"（跳过 /external 中转页）为可选项，可在油猴菜单中开关。支持主站与全部备用域名。
 // @author       liushuye555
 // @license      MIT
@@ -56,8 +56,28 @@
     } catch (e) { return false; }
   };
 
+  // 判定是否为正文容器：含正文标记、段落密集、或图文并茂的一律视为内容，禁止隐藏。
+  // 注意：纯广告图片堆没有 <p> 段落，不会被误判为正文。
+  const looksLikeContent = (el) => {
+    try {
+      if (el.querySelector('article, .prose')) return true;
+      const pCount = el.querySelectorAll('p').length;
+      const imgCount = el.querySelectorAll('img').length;
+      const textLen = (el.textContent || '').length;
+      if (pCount >= 5 && textLen > 400) return true;
+      if (imgCount >= 4 && pCount >= 3 && textLen > 200) return true;
+      return false;
+    } catch (e) { return false; }
+  };
+
   const hide = (el, rule) => {
     if (!el) return;
+    // 内容保险丝：任何规则都不得隐藏"看起来是正文"的容器
+    // （详情页的推广角标、站外图床等都可能与广告特征相似，这里是最后防线）
+    if (looksLikeContent(el)) {
+      console.log('[VikACG 去广告] 跳过含正文内容的容器，未隐藏（规则:' + rule + '）');
+      return;
+    }
     el.dataset.vkAdRule = rule;
     el.style.setProperty('display', 'none', 'important');
   };
@@ -288,12 +308,31 @@
       // 3) 统一广告识别：站外 a.w-full 是站点广告渲染器的固定特征（均经 div.contents 包裹）
       doc.querySelectorAll('a.w-full[href]').forEach((a) => {
         if (a.dataset.vkAdRule || a.closest('[data-vk-ad-rule]') || !isExternal(a)) return;
+        // 跳过正文区域：文章内嵌的图片/下载链接可能同样是"站外 w-full 链接"
+        if (a.closest('main .prose, article')) return;
         const contents = a.closest('div.contents');
         if (!contents) return;
-        // 3a) 侧栏广告卡片 → 整卡隐藏
+        // 纯广告包装层：内部链接全部站外且数量少（无任何站内内容链接）
+        const pureAdBox = (el) => {
+          if (!el || el === doc.body) return false;
+          const links = Array.from(el.querySelectorAll('a[href]'));
+          return links.length >= 1 && links.length <= 8 && links.every(isExternal);
+        };
+        // 逐单元隐藏：contents 的父层若仍是纯广告层则连同隐藏（如正文内多个广告共用一层）
+        const hideUnit = () => {
+          if (!cfg.carouselAds) return;
+          const box = contents.parentElement;
+          if (pureAdBox(box)) { hide(box, 'banner'); return; }
+          hide(contents, 'banner');
+        };
+        // 3a) shadow-card 广告卡 → 整卡隐藏；若整卡是正文容器（文章内嵌广告）→ 逐单元隐藏
         const card = a.closest('div.shadow-card');
         if (card && card.contains(contents)) {
-          if (cfg.sidebarAds) hide(card, 'sidebar');
+          if (!looksLikeContent(card)) {
+            if (cfg.sidebarAds) hide(card, 'sidebar');
+          } else {
+            hideUnit(); // 文章内嵌广告横幅
+          }
           return;
         }
         // 3b) arco 轮播内的幻灯片
@@ -306,20 +345,14 @@
         const modal = a.closest('.arco-modal');
         if (modal && modal.contains(contents)) {
           if (cfg.sidebarAds) {
-            const box = contents.parentElement && contents.parentElement !== modal ? contents.parentElement : contents;
-            const links = Array.from(box.querySelectorAll('a[href]'));
-            if (links.length <= 8 && links.every(isExternal)) hide(box, 'modal-ad');
+            const box = contents.parentElement;
+            if (pureAdBox(box)) hide(box, 'modal-ad');
+            else if (pureAdBox(contents)) hide(contents, 'modal-ad');
           }
           return;
         }
-        // 3d) 页面横幅区（新版轮播幻灯片）：包装层里全是站外链接时才整层隐藏，避免误伤
-        if (cfg.carouselAds) {
-          const box = contents.parentElement;
-          if (box && box !== doc.body) {
-            const links = Array.from(box.querySelectorAll('a[href]'));
-            if (links.length <= 8 && links.every(isExternal)) hide(box, 'banner');
-          }
-        }
+        // 3d) 页面横幅区（新版轮播幻灯片）：纯广告包装层才隐藏，避免误伤
+        hideUnit();
       });
 
       // 4) 信息流广告卡片
@@ -329,11 +362,17 @@
           if (a.dataset.vkAdRule || a.closest('[data-vk-ad-rule]') || !isExternal(a)) return;
           hide(a, 'feed');
         });
-        // 变体二：带"XX区-推广"角标
+        // 变体二：带"XX区-推广"角标。只隐藏"整卡是一个链接"的列表卡（a.shadow-card）
+        // 或无语义包装层（div.contents）；绝不上爬到 div.shadow-card——
+        // 文章详情页的正文容器也是 shadow-card，里面同样有推广角标
         doc.querySelectorAll('a[href], span').forEach((el) => {
           if (el.children.length > 0 || el.dataset.vkAdRule) return;
           if (!/^[^/\n]{0,10}区-推广$/.test((el.textContent || '').trim())) return;
-          hide(el.closest('a.shadow-card') || el.closest('.shadow-card') || el.closest('div.contents') || el.closest('li') || el, 'feed');
+          const listCard = el.closest('a.shadow-card');
+          const wrapper = el.closest('div.contents');
+          if (listCard) { hide(listCard, 'feed'); return; }
+          if (wrapper) { hide(wrapper, 'feed'); return; }
+          hide(el, 'feed'); // 兜底只隐藏角标本身
         });
       }
 
@@ -341,6 +380,8 @@
       if (cfg.pinkLinks) {
         doc.querySelectorAll('a[class*="text-pink"][href]').forEach((a) => {
           if (a.dataset.vkAdRule || !isExternal(a)) return;
+          // 跳过正文区域：文章正文/评论里的粉色样式链接不是广告
+          if (a.closest('main, .prose, article')) return;
           const item = a.parentElement;
           // 仅当父容器只包着这一个链接时连容器一起隐藏，避免误伤菜单
           if (item && item.querySelectorAll('a[href]').length === 1 && (item.textContent || '').trim().length <= 30) {
