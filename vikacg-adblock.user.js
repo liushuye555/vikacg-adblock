@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VikACG 去广告（维咔V站）
 // @namespace    https://www.vikacg.com/
-// @version      1.4.2
+// @version      1.4.3
 // @description  移除维咔VikACG 的顶部广告条、轮播广告图、侧栏广告卡、信息流推广卡片与菜单广告链接，使站点的"广告拦截器检测"失效，并拦截投票/收藏/搜索后自动弹出的广告页。所有去广告动作只隐藏广告元素本身，不拦截、不改写任何正常链接的跳转；"外链直达"（跳过 /external 中转页）为可选项，可在油猴菜单中开关。支持主站与全部备用域名。
 // @author       liushuye555
 // @license      MIT
@@ -409,13 +409,17 @@
           if (pureAdBox(box)) { hide(box, 'banner'); return; }
           hide(contents, 'banner');
         };
-        // 3a) shadow-card 广告卡 → 整卡隐藏；若整卡是正文容器（文章内嵌广告）→ 逐单元隐藏
+        // 3a) shadow-card 广告卡 → 整卡隐藏；文章详情页的正文容器同名，须结构定界：
+        // 正文容器外层是 DIV.relative > DIV.three-column-middle（三栏布局），
+        // 真广告卡外层是 DIV.relative 直挂右栏或 grid。凡 shadow-card 在
+        // .three-column-middle / .layout-body 主列里一律视为内容，只做单元隐藏
         const card = a.closest('div.shadow-card');
         if (card && card.contains(contents)) {
-          if (!looksLikeContent(card)) {
+          const inMainColumn = !!card.closest('.three-column-middle, .layout-body main, main .three-column-middle');
+          if (!inMainColumn && !looksLikeContent(card)) {
             if (cfg.sidebarAds) hide(card, 'sidebar');
           } else {
-            hideUnit(); // 文章内嵌广告横幅
+            hideUnit(); // 主列内（正文容器或正文内嵌广告）→ 只隐藏纯广告单元
           }
           return;
         }
@@ -503,6 +507,20 @@
 
       if (sweepTipsFn) sweepTipsFn();
     };
+
+    // 自愈兜底：Vue 异步水合的时序竞态会让清扫在"卡片还没装进正文"的瞬间误判。
+    // 定期复查：凡被 sidebar/feed 规则隐藏、但后来长出了正文（.prose/article 或
+    // 段落密集）的元素，立即恢复显示并记日志。
+    const selfHeal = () => {
+      doc.querySelectorAll('[data-vk-ad-rule="sidebar"], [data-vk-ad-rule="feed"]').forEach((el) => {
+        if (looksLikeContent(el)) {
+          console.log('[VikACG 去广告] 自愈：恢复被误隐藏的正文容器（规则:' + el.dataset.vkAdRule + '）');
+          el.style.removeProperty('display');
+          delete el.dataset.vkAdRule;
+        }
+      });
+    };
+    setInterval(selfHeal, 1000);
 
     // 变更监听（广告异步注入 / SPA 换页后再次清除）
     let raf = 0;
