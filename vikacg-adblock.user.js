@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VikACG 去广告（维咔V站）
 // @namespace    https://www.vikacg.com/
-// @version      1.3.1
+// @version      1.4.0
 // @description  移除维咔VikACG 的顶部广告条、轮播广告图、侧栏广告卡、信息流推广卡片与菜单广告链接，使站点的"广告拦截器检测"失效，并拦截投票/收藏/搜索后自动弹出的广告页。所有去广告动作只隐藏广告元素本身，不拦截、不改写任何正常链接的跳转；"外链直达"（跳过 /external 中转页）为可选项，可在油猴菜单中开关。支持主站与全部备用域名。
 // @author       liushuye555
 // @license      MIT
@@ -32,7 +32,7 @@
 
   /* ---------------- 设置 ---------------- */
   const DEFAULTS = {
-    adShowOff: true,      // 用站点自带的 adShow 开关从源头关闭广告
+    adShowOff: false,     // （实验性）改站点启动配置关广告；曾导致部分组件不渲染，默认关闭
     headerAds: true,      // 顶部横向广告条
     carouselAds: true,    // 轮播广告图（只移除包含外链的轮播）
     sidebarAds: true,     // 侧栏广告卡片
@@ -44,9 +44,13 @@
     externalDirect: true, // 外链直达：跳过 /external 中转页直接打开目标网址
   };
   let cfg;
-  try { cfg = Object.assign({}, DEFAULTS, JSON.parse(GM_getValue('vkacg_cfg', '{}'))); }
+  try {
+    const saved = JSON.parse(GM_getValue('vkacg_cfg', '{}'));
+    // v1.4.0 配置迁移：旧配置整体作废，避免携带已弃用的默认值
+    cfg = (saved && saved._v === 2) ? Object.assign({}, DEFAULTS, saved) : Object.assign({}, DEFAULTS);
+  }
   catch (e) { cfg = Object.assign({}, DEFAULTS); }
-  const saveCfg = () => { try { GM_setValue('vkacg_cfg', JSON.stringify(cfg)); } catch (e) {} };
+  const saveCfg = () => { try { GM_setValue('vkacg_cfg', JSON.stringify(Object.assign({}, cfg, { _v: 2 }))); } catch (e) {} };
 
   const isExternal = (a) => {
     try {
@@ -203,6 +207,28 @@
     if (doc.documentElement) mountBaitStyle();
     doc.addEventListener('DOMContentLoaded', mountBaitStyle);
 
+    // 3b) 诱饵同步护盾：站点检测是"插入诱饵后同一同步周期内立即测量"，
+    // MutationObserver 来不及。uBlock 等扩展的通用规则（.adBanner 等类名全在 EasyList）
+    // 会在级联竞争中藏掉诱饵 → 检测命中 → 弹窗。
+    // 在 appendChild 里对诱饵写入内联样式（内联 !important 优先级最高，必胜任何样式表）。
+    const BAIT_SEL = '.pub_300x250,.pub_300x250m,.pub_728x90,.text-ad,.textAd,.text_ad,.text_ads,' +
+      '.text-ad-links,.ad-text,.adSense,.adBlock,.adContent,.adBanner';
+    try {
+      const proto = win.Element && win.Element.prototype;
+      const origAppend = proto.appendChild;
+      proto.appendChild = function (node) {
+        try {
+          if (node && node.nodeType === 1 && this === doc.body &&
+              typeof node.matches === 'function' && node.matches(BAIT_SEL)) {
+            node.style.cssText = 'width:1px !important;height:1px !important;position:absolute !important;' +
+              'left:-10000px !important;top:-1000px !important;display:block !important;' +
+              'visibility:visible !important;opacity:1 !important;';
+          }
+        } catch (e) {}
+        return origAppend.apply(this, arguments);
+      };
+    } catch (e) {}
+
     // 4) 检测脚本会在 body 上打 abp 标记，持续移除
     const startAttrGuard = () => {
       if (doc.body && !startAttrGuard._mo) {
@@ -215,12 +241,17 @@
     doc.addEventListener('DOMContentLoaded', startAttrGuard);
     try { startAttrGuard(); } catch (e) {}
 
-    // 5) 保险丝：万一仍弹检测提示，按文本特征把弹窗隐藏
-    const TIP = /广告拦截器已启用|检测到您的浏览器启用了广告拦截器|PWA 已暂停渲染|ad.?blocker (is|has been) enabled/i;
+    // 5) 保险丝：万一仍弹检测提示，按文本特征把弹窗隐藏。
+    // 站点会在文案里插零宽字符（U+200B 等）防文本匹配，匹配前必须先剥离。
+    const stripZW = (s) => (s || '').replace(/[\u200B-\u200D\uFEFF\u2060]/g, '');
+    const TIP = /广告拦截器已启用|启用了广告拦截器|PWA ?已暂停渲染|ad ?blocker enabled|has an ad ?blocker enabled|ad ?blocker (is|has been) enabled/i;
     sweepTipsFn = () => {
-      doc.querySelectorAll('.arco-notification, .arco-modal, [role="dialog"], [id*="adblock-tips"]').forEach((box) => {
+      doc.querySelectorAll('.arco-notification, .arco-modal, .arco-modal-wrapper, [role="dialog"], [id*="adblock-tips"]').forEach((box) => {
         if (box.dataset.vkAdRule) return;
-        if (TIP.test(box.textContent || '')) hide(box, 'detect-tip');
+        if (TIP.test(stripZW(box.textContent || ''))) {
+          // 弹窗本体常包在带遮罩的 wrapper 里，藏 wrapper 才不会留黑罩
+          hide(box.closest('.arco-modal-wrapper') || box, 'detect-tip');
+        }
       });
     };
   })();
@@ -376,8 +407,9 @@
         });
       }
 
-      // 5) 菜单里的粉色广告链接（仅站外链接，站内粉色 UI 不动）
+      // 5) 菜单里的广告链接（仅站外链接，站内菜单项不动）
       if (cfg.pinkLinks) {
+        // 变体一：粉色样式（旧版头部/抽屉广告）
         doc.querySelectorAll('a[class*="text-pink"][href]').forEach((a) => {
           if (a.dataset.vkAdRule || !isExternal(a)) return;
           // 跳过正文区域：文章正文/评论里的粉色样式链接不是广告
@@ -388,6 +420,20 @@
             hide(item, 'pink');
           } else {
             hide(a, 'pink');
+          }
+        });
+        // 变体二：侧栏/抽屉菜单里的站外短文字链接（站点会换样式，不依赖颜色类名）。
+        // 菜单正常项都是站内链接；菜单里的站外短链接只有广告（社交/友链在页脚和右栏，不在此结构内）
+        doc.querySelectorAll('.scrollbar-container a[href], .arco-menu-inner a[href]').forEach((a) => {
+          if (a.dataset.vkAdRule || a.closest('[data-vk-ad-rule]') || !isExternal(a)) return;
+          if (a.closest('main, .prose, article')) return;
+          if ((a.textContent || '').trim().length > 30 || a.querySelector('img, svg')) return;
+          const section = a.closest('div.px-2.pb-2') || a.parentElement;
+          const links = section ? Array.from(section.querySelectorAll('a[href]')) : [a];
+          if (section && links.length >= 1 && links.length <= 8 && links.every(isExternal)) {
+            hide(section, 'menu-ad');
+          } else {
+            hide(a, 'menu-ad');
           }
         });
       }
@@ -427,7 +473,7 @@
     }
     const ITEMS = [
       ['externalDirect', '外链直达（跳过 /external 中转页）'],
-      ['adShowOff', '从源头关闭广告（站点 adShow 开关）'],
+      ['adShowOff', '从源头关闭广告（实验性，部分页面可能异常）'],
       ['headerAds', '隐藏顶部广告条'],
       ['carouselAds', '隐藏轮播/横幅广告图'],
       ['sidebarAds', '隐藏侧栏广告卡/弹窗广告横幅'],
@@ -440,15 +486,14 @@
     let ids = [];
     const registerAll = () => {
       ids.forEach((id) => { try { GM_unregisterMenuCommand(id); } catch (e) {} });
-      ids = ITEMS.map(([key, label]) => GM_registerMenuCommand(
+      ids = ITEMS.filter((it) => it).map(([key, label]) => GM_registerMenuCommand(
         (cfg[key] ? '✅ ' : '❌ ') + label,
         () => {
           cfg[key] = !cfg[key];
           saveCfg();
           applyCss();
-          if (key === 'adShowOff' && !cfg.adShowOff) {
-            try { const p = win.__NUXT__ && win.__NUXT__.config && win.__NUXT__.config.public; if (p) p.adShow = true; } catch (e) {}
-            setTimeout(() => location.reload(), 300); // 恢复广告需要重新加载让站点重新拉取
+          if (key === 'adShowOff') {
+            setTimeout(() => location.reload(), 300); // adShow 是启动配置，必须重载生效
           }
           registerAll();
         },
