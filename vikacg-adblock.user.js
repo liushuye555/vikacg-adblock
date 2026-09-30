@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VikACG 去广告（维咔V站）
 // @namespace    https://www.vikacg.com/
-// @version      1.4.1
+// @version      1.4.2
 // @description  移除维咔VikACG 的顶部广告条、轮播广告图、侧栏广告卡、信息流推广卡片与菜单广告链接，使站点的"广告拦截器检测"失效，并拦截投票/收藏/搜索后自动弹出的广告页。所有去广告动作只隐藏广告元素本身，不拦截、不改写任何正常链接的跳转；"外链直达"（跳过 /external 中转页）为可选项，可在油猴菜单中开关。支持主站与全部备用域名。
 // @author       liushuye555
 // @license      MIT
@@ -274,6 +274,25 @@
       }
     } catch (e) {}
 
+    // 4c) 诱饵保活扫描：uBlock 等扩展会用自己的样式表藏掉检测诱饵（append 挂钩写入的
+    // 内联样式可被 !important 样式表覆盖，且脚本注入晚于扩展样式表时护盾会输掉级联）。
+    // 检测靠"诱饵尺寸为 0"返回 true；这里高频强制诱饵内联可见，让测量永远是 1px≠0。
+    // 高频 150ms 抢在站点检测 debounce 处理结果之前完成"复活"。
+    const BAIT_LIVE = '.pub_300x250,.pub_300x250m,.pub_728x90,.text-ad,.textAd,.text_ad,.text_ads,' +
+      '.text-ad-links,.ad-text,.adSense,.adBlock,.adContent,.adBanner';
+    const keepAlive = () => {
+      try {
+        doc.querySelectorAll(BAIT_LIVE).forEach((el) => {
+          if (el.closest('[data-vk-ad-rule]')) return; // 我们自己隐藏的广告不复活
+          el.style.cssText = 'width:1px !important;height:1px !important;position:absolute !important;' +
+            'left:-10000px !important;top:-1000px !important;display:block !important;' +
+            'visibility:visible !important;opacity:1 !important;';
+        });
+      } catch (e) {}
+    };
+    setInterval(keepAlive, 150);
+    keepAlive();
+
     // 5) 保险丝：万一仍弹检测提示，按文本特征把弹窗隐藏。
     // 站点会在文案里插零宽字符（U+200B 等）防文本匹配，匹配前必须先剥离。
     const stripZW = (s) => (s || '').replace(/[\u200B-\u200D\uFEFF\u2060]/g, '');
@@ -500,6 +519,7 @@
   })();
 
   /* ---------------- 油猴菜单开关 ---------------- */
+  const stripZWText = (s) => (s || '').replace(/[​-‍﻿⁠]/g, '');
   (function menu() {
     if (typeof GM_registerMenuCommand !== 'function') {
       win.__vkacgAd = { cfg, saveCfg, applyCss }; // 备用：控制台 __vkacgAd.cfg.externalDirect=false; __vkacgAd.saveCfg(); location.reload()
@@ -545,9 +565,16 @@
         当前页面: location.pathname,
         配置: cfg,
         正文: prose ? { 存在: true, 可见: vis(prose), 段落数: prose.querySelectorAll('p').length, 图片数: prose.querySelectorAll('img').length } : { 存在: false },
+        站点是否降级渲染: (() => {
+          // 正文未渲染时 prose 里几乎无内容（<2000 字）且页面有评论区 → 站点降级
+          if (!prose) return '无正文容器';
+          return (prose.textContent || '').length < 2000 ? '疑似降级（正文未渲染，检测命中导致）' : '正常';
+        })(),
         已隐藏元素按规则: rules,
         检测标记abp: doc.body.hasAttribute('abp'),
-        检测弹窗当前可见: Array.from(doc.querySelectorAll('.arco-modal-wrapper, .arco-notification')).filter((b) => b.offsetParent !== null && !b.dataset.vkAdRule).length,
+        活着的弹窗: Array.from(doc.querySelectorAll('.arco-modal-wrapper, .arco-notification'))
+          .filter((b) => b.offsetParent !== null && !b.dataset.vkAdRule)
+          .map((b) => stripZWText(b.textContent || '').replace(/\s+/g, ' ').slice(0, 40)),
         被我隐藏且在main内的元素: Array.from(doc.querySelectorAll('main [data-vk-ad-rule]')).map((e) => e.tagName + '.' + (typeof e.className === 'string' ? e.className.slice(0, 50) : '')),
       };
       console.log('%c========== VikACG 排查信息（复制下面整段发给我）==========', 'color:#7c3aed;font-weight:bold');
