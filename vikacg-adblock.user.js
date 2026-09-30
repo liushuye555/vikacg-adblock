@@ -27,8 +27,11 @@
 (function () {
   'use strict';
 
+  const VERSION = '1.4.0';
   const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const doc = win.document;
+  // 版本横幅：方便自查 Tampermonkey 里跑的是否是最新版
+  console.log('%c[VikACG 去广告] v' + VERSION + ' 已加载', 'color:#7c3aed;font-weight:bold');
 
   /* ---------------- 设置 ---------------- */
   const DEFAULTS = {
