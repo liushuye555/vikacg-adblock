@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         VikACG 去广告（维咔V站）
 // @namespace    https://www.vikacg.com/
-// @version      1.4.3
-// @description  移除维咔VikACG 的顶部广告条、轮播广告图、侧栏广告卡、信息流推广卡片与菜单广告链接，使站点的"广告拦截器检测"失效，并拦截投票/收藏/搜索后自动弹出的广告页。所有去广告动作只隐藏广告元素本身，不拦截、不改写任何正常链接的跳转；"外链直达"（跳过 /external 中转页）为可选项，可在油猴菜单中开关。支持主站与全部备用域名。
+// @version      1.4.4
+// @description  移除维咔VikACG 的顶部广告条、轮播广告图、侧栏广告卡、信息流推广卡片与菜单广告链接，使站点的"广告拦截器检测"失效，并拦截投票/收藏/搜索后自动弹出的广告页。所有去广告动作只隐藏广告元素本身，不拦截、不改写任何正常链接的跳转；"外链直达"（跳过 /external 中转页）为可选项，可在油猴菜单中开关，同时兼容新旧两种外链参数格式。支持主站与全部备用域名。
 // @author       liushuye555
 // @license      MIT
 // @match        *://www.vikacg.com/*
@@ -28,7 +28,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.4';
   const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const doc = win.document;
   // 版本横幅：方便自查 Tampermonkey 里跑的是否是最新版
@@ -310,18 +310,39 @@
   })();
 
   /* ---------------- 第 3 层：外链直达（可选，默认开） ---------------- */
-  // 站点会把外链导航到 /external?url=... 中转页（滚动确认/人机验证/推广App）。
-  // 开启后读取 url 参数直接跳转；关闭则完全保持站点原有行为。仅处理 http(s) 外链。
+  // 站点会把外链导航到 /external 中转页（滚动确认/人机验证/推广App），两种参数形态：
+  //   ?url=<明文链接>（旧）  ?e=<AES-128-CBC 密文 hex>（现行，2026-10 更新）
+  // e 参数用站点固定密钥即可解出真实地址（算法提取自站点自身前端代码），
+  // 与站点 /external 页"解密后展示"用的是同一把钥匙，不属于绕过任何验证。
+  // 开启后解出目标直接跳转；关闭则完全保持站点原有行为。仅处理 http(s) 外链。
   (function externalDirect() {
     if (!cfg.externalDirect) return;
     let jumped = false;
-    const jump = () => {
+    const EN_WS = 'crypto' in win && win.crypto && win.crypto.subtle && win.crypto.subtle.decrypt;
+    if (!EN_WS) console.log('[VikACG 去广告] 当前环境无 WebCrypto，新版加密外链将保持站点原行为');
+
+    // 与站点前端一致的 AES-128-CBC/PKCS7 解密（hex 密文 → utf8 明文）
+    async function decryptE(hex) {
+      if (!EN_WS || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 32 !== 0) return '';
+      const raw = new Uint8Array(hex.match(/../g).map((h) => parseInt(h, 16)));
+      const k = await win.crypto.subtle.importKey('raw', new TextEncoder().encode('7R75R3JZE2PZUTHH'), 'AES-CBC', false, ['decrypt']);
+      const pt = await win.crypto.subtle.decrypt({ name: 'AES-CBC', iv: new TextEncoder().encode('XWO76NCVZM2X1UCU') }, k, raw);
+      return new TextDecoder().decode(pt);
+    }
+
+    const jump = async () => {
       try {
         if (jumped || cfg.externalDirect === false || location.pathname !== '/external') return;
-        const url = new URLSearchParams(location.search).get('url') || '';
+        const sp = new URLSearchParams(location.search);
+        let url = sp.get('url') || '';
+        if (!url) {
+          const e = sp.get('e') || '';
+          if (!e) return;
+          url = await decryptE(e);
+        }
         if (!/^https?:\/\//i.test(url)) return;
         const target = new URL(url, location.href);
-        if (target.host === location.host) return;
+        if (target.host === location.host) return; // 解密失败/站内地址：留给站点自己的确认页处理
         jumped = true;
         location.replace(target.href);
       } catch (e) {}
